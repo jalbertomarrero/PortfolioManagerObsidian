@@ -11,56 +11,73 @@ import yfinance as yf
 import re
 import io
 import os
-from datetime import datetime
 import matplotlib.pyplot as plt
+from curl_cffi import requests # Switched from standard requeststo curl_cffi
+import urllib3
+from datetime import datetime
 
 # --- CONFIGURATION ---
 OBSIDIAN_NOTE_PATH = "C:\\Vaults\\JamsVault\\009 Banca e inversión\\My Portfolio.md"
-OBSIDIAN_ASSETS_PATH = "C:\\Vaults\\JamsVault\\000 Assets"
+OBSIDIAN_ASSETS_PATH = "C:\\Vaults\\JamsVault\\000 Assets\\"
 TITLE_PORTFOLIO_SECTION = "Portfolio"
 TITLE_SUMMARY_SECTION = "Portfolio Summary"
 THRESHOLD_BUY = 1.33  # 33% above purchase price
 THRESHOLD_SELL = 0.75  # 25% below peak price
 
-def generate_performance_chart(df, folder_path, update_date):
-    """Generates a performance and allocation chart."""
-    # Filter out cash if you only want to see securities
-    plot_df = df.copy()
-    
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+# --- SSL & SESSION SETUP ---
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    # Bar chart for Weights
-    color_weight = '#a8dadc'
-    ax1.set_xlabel('Security')
-    ax1.set_ylabel('Portfolio Weight (%)', color='#457b9d')
-    bars = ax1.bar(plot_df['Name'], plot_df['Weight (%)'], color=color_weight, alpha=0.7, label='Weight %')
+def generate_performance_chart(df, folder_path, update_date):
+    """Generates a performance chart with a cleaned-up single grid."""
+    plt.style.use('ggplot')
+    
+    display_names = []
+    for n in df['Name']:
+        clean_name = str(n).strip()
+        display_names.append((clean_name[:12] + '...') if len(clean_name) > 15 else clean_name)
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    # --- PRIMARY AXIS (Left) ---
+    ax1.set_xlabel('Security', fontweight='bold')
+    ax1.set_ylabel('Portfolio Weight (%)', color='#457b9d', fontweight='bold')
+    ax1.bar(display_names, df['Weight (%)'], color='#a8dadc', alpha=0.8)
     ax1.tick_params(axis='y', labelcolor='#457b9d')
+    # We keep the grid on for ax1 by default with ggplot
+    
     plt.xticks(rotation=45, ha='right')
 
-    # Line chart for Performance %
+    # --- SECONDARY AXIS (Right) ---
     ax2 = ax1.twinx()
-    color_perf = '#e63946'
-    ax2.set_ylabel('Performance in CHF (%)', color=color_perf)
-    ax2.plot(plot_df['Name'], plot_df['Performance (P/L) in CHF in %'], color=color_perf, marker='o', linewidth=2, label='Perf %')
-    ax2.tick_params(axis='y', labelcolor=color_perf)
+    ax2.set_ylabel('Performance (CHF %)', color='#e63946', fontweight='bold')
+    ax2.plot(display_names, df['Performance (P/L) in CHF in %'], color='#e63946', marker='o', linewidth=2)
+    ax2.tick_params(axis='y', labelcolor='#e63946')
     
-    # Add a horizontal line at 0%
-    ax2.axhline(0, color='black', linestyle='--', linewidth=0.8)
+    # CRITICAL FIX: Turn off the grid for the second axis to remove the extra white lines
+    ax2.grid(False)
 
-    plt.title(f'Portfolio Status - {update_date}')
+    # Add a clean black baseline for 0% performance
+    ax2.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.3)
+
+    plt.title(f'Portfolio Analysis - {update_date}', fontsize=14, fontweight='bold')
     fig.tight_layout()
     
     chart_filename = f"portfolio_chart_{update_date}.png"
-    chart_path = os.path.join(folder_path, chart_filename)
-    plt.savefig(chart_path)
+    plt.savefig(os.path.join(folder_path, chart_filename))
     plt.close()
+    
     return chart_filename
+
+# Create the specific session type yfinance now requires
+# 'verify=False' bypasses the corporate SSL certificate issue
+# 'impersonate="chrome"' helps mimic a real browser to avoid Yahoo's bot blocks
+session = requests.Session(verify=False, impersonate="chrome")
 
 def get_exchange_rate(from_curr, to_curr="CHF"):
     if from_curr == to_curr: return 1.0
     try:
         ticker = f"{from_curr}{to_curr}=X"
-        data = yf.Ticker(ticker).history(period="1d")
+        data = yf.Ticker(ticker, session=session).history(period="1d")
         return data['Close'].iloc[-1]
     except:
         print(f"Error fetching FX rate for {from_curr}. Using 1.0 as fallback.")
@@ -83,8 +100,13 @@ def run_update():
     if not os.path.exists(OBSIDIAN_NOTE_PATH):
         print(f"File not found: {OBSIDIAN_NOTE_PATH}")
         return
+    
+    if not os.path.exists(OBSIDIAN_ASSETS_PATH):
+        print(f"Assets folder not found: {OBSIDIAN_ASSETS_PATH}")
+        return
 
     note_folder = os.path.dirname(OBSIDIAN_NOTE_PATH)
+    attachments_folder = os.path.dirname(OBSIDIAN_ASSETS_PATH)
     
     with open(OBSIDIAN_NOTE_PATH, 'r', encoding='utf-8') as f:
         full_content = f.read()
@@ -98,12 +120,29 @@ def run_update():
     if not table_match:
         print("Table not found in Portfolio section.")
         return
-    
+        
     table_raw = table_match.group(1)
     lines = table_raw.strip().split('\n')
     data_lines = [l for l in lines if not re.match(r'^\|[:\s-]*\|', l)]
     df = pd.read_csv(io.StringIO('\n'.join(data_lines).replace('|', ',')), sep=',').iloc[:, 1:-1]
     df.columns = [c.strip() for c in df.columns]
+
+    # Force numeric collums to float
+    numeric_cols = [
+        'Quantity', 'Purchase price', 'Last close price', 
+        'Minimum close price', 'Maximum close price', 'Weight (%)', 
+        'Market value', 'Performance (P/L) in security currency', 
+        'Performance (P/L) in CHF', 'Performance (P/L) in security currency in %', 
+        'Performance (P/L) in CHF in %'
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            # Converts existing text/ints to floats and fills empty spots with 0.0
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(float)
+
+    # Remove extra spaces from string columns
+    if 'Name' in df.columns:
+        df['Name'] = df['Name'].astype(str).str.strip()
 
     cash_chf = get_summary_value(summary_section, "Cash CHF")
     cash_eur = get_summary_value(summary_section, "Cash EUR")
@@ -129,7 +168,7 @@ def run_update():
     for idx, row in df.iterrows():
         ticker_symbol = str(row['Ticker']).strip()
         print(f"Processing {ticker_symbol}...")
-        stock = yf.Ticker(ticker_symbol)
+        stock = yf.Ticker(ticker_symbol, session=session)
         curr = row['Currency'].strip()
         fx = fx_map.get(curr, 1.0)
         
@@ -139,24 +178,24 @@ def run_update():
             hist = stock.history(start=start_date)
             if not hist.empty:
                 # Update Max
-                new_max_price = round(hist['Close'].max(), 2)
+                new_max_price = round(float(hist['Close'].max()), 2)
                 new_max_date = hist['Close'].idxmax().strftime("%Y-%m-%d")
                 df.at[idx, 'Maximum close price'] = new_max_price
                 df.at[idx, 'Maximum close date'] = new_max_date
                 
                 # Update Min
-                new_min_price = round(hist['Close'].min(), 2)
+                new_min_price = round(float(hist['Close'].min()), 2)
                 new_min_date = hist['Close'].idxmin().strftime("%Y-%m-%d")
                 df.at[idx, 'Minimum close price'] = new_min_price
                 df.at[idx, 'Minimum close date'] = new_min_date
                 
-                new_close = round(hist['Close'].iloc[-1], 2)
+                new_close = round(float(hist['Close'].iloc[-1]), 2)
             else:
                 print(f"No history found for {ticker_symbol}")
                 continue
         else:
             hist = stock.history(period="1d")
-            new_close = round(hist['Close'].iloc[-1], 2)
+            new_close = round(float(hist['Close'].iloc[-1]), 2)
             
             # Incremental Max/Min Update
             if new_close > float(row['Maximum close price']):
@@ -199,7 +238,7 @@ def run_update():
         
     # --- NEW: CHART GENERATION ---
     print("Generating performance chart...")
-    chart_file = generate_performance_chart(df, note_folder, today)
+    chart_file = generate_performance_chart(df, attachments_folder, today)
 
     # 6. Reconstruct Note
     new_table = df.to_markdown(index=False)
@@ -220,7 +259,7 @@ def run_update():
     signal_entry += f"![[{chart_file}]]\n\n"  # This embeds the chart in Obsidian
     signal_entry += f"**Total Performance:** {total_perf_chf:,.2f} CHF ({total_perf_pct:.2f}%)\n\n"
     signal_entry += "\n".join(signals) if signals else "No buy/sell signals today."
-    signal_entry += "\n---"
+    signal_entry += "\n\n---"
 
     # Replace and Save
     updated_content = full_content.replace(table_raw, new_table)
