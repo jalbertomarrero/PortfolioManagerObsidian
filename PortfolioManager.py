@@ -12,6 +12,7 @@ import re
 import io
 import os
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from curl_cffi import requests # Switched from standard requeststo curl_cffi
 import urllib3
 from datetime import datetime
@@ -28,42 +29,73 @@ THRESHOLD_SELL = 0.75  # 25% below peak price
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def generate_performance_chart(df, folder_path, update_date):
-    """Generates a performance chart with a cleaned-up single grid."""
+    """Generates a performance chart with Tickers on x-axis and a multi-column legend at the bottom."""
     plt.style.use('ggplot')
     
-    display_names = []
-    for n in df['Name']:
-        clean_name = str(n).strip()
-        display_names.append((clean_name[:12] + '...') if len(clean_name) > 15 else clean_name)
-
-    fig, ax1 = plt.subplots(figsize=(12, 6))
-
-    # --- PRIMARY AXIS (Left) ---
-    ax1.set_xlabel('Security', fontweight='bold')
-    ax1.set_ylabel('Portfolio Weight (%)', color='#457b9d', fontweight='bold')
-    ax1.bar(display_names, df['Weight (%)'], color='#a8dadc', alpha=0.8)
-    ax1.tick_params(axis='y', labelcolor='#457b9d')
-    # We keep the grid on for ax1 by default with ggplot
+    # 1. Prepare Data
+    tickers = df['Ticker'].astype(str).str.strip().tolist()
+    names = df['Name'].astype(str).str.strip().tolist()
     
-    plt.xticks(rotation=45, ha='right')
+    # Increased the figure height (8) to accommodate the bottom legend
+    fig, ax1 = plt.subplots(figsize=(12, 8)) 
 
-    # --- SECONDARY AXIS (Right) ---
+    # 2. Primary Axis (Bars - Weight %)
+    ax1.set_xlabel('Security Ticker', fontweight='bold')
+    ax1.set_ylabel('Portfolio Weight (%)', color='#457b9d', fontweight='bold')
+    ax1.bar(tickers, df['Weight (%)'], color='#a8dadc', alpha=0.8, label='Weight %')
+    ax1.tick_params(axis='y', labelcolor='#457b9d')
+    plt.xticks(rotation=0) 
+
+    # 3. Secondary Axis (Line - Performance %)
     ax2 = ax1.twinx()
     ax2.set_ylabel('Performance (CHF %)', color='#e63946', fontweight='bold')
-    ax2.plot(display_names, df['Performance (P/L) in CHF in %'], color='#e63946', marker='o', linewidth=2)
+    ax2.plot(tickers, df['Performance (P/L) in CHF in %'], 
+             color='#e63946', marker='o', linewidth=2, label='Perf %')
     ax2.tick_params(axis='y', labelcolor='#e63946')
     
-    # CRITICAL FIX: Turn off the grid for the second axis to remove the extra white lines
-    ax2.grid(False)
-
-    # Add a clean black baseline for 0% performance
+    # Keep the grid clean
+    ax2.grid(False) 
     ax2.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.3)
 
-    plt.title(f'Portfolio Analysis - {update_date}', fontsize=14, fontweight='bold')
-    fig.tight_layout()
+    # 4. Create the Glossary (Higher character limit: 40)
+    glossary_entries = []
+    for t, n in zip(tickers, names):
+        clean_name = n.strip()
+        # Allowing up to 40 characters now
+        display_name = (clean_name[:37] + '...') if len(clean_name) > 40 else clean_name
+        proxy = mpatches.Rectangle((0, 0), 1, 1, fill=False, edgecolor='none', visible=False)
+        glossary_entries.append((proxy, f"{t}: {display_name}"))
+
+    # 5. Build Combined Legend at the Bottom
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    h3 = [e[0] for e in glossary_entries]
+    l3 = [e[1] for e in glossary_entries]
+
+    all_handles = h1 + h2 + h3
+    all_labels = l1 + l2 + l3
     
+    # Move legend to bottom: 
+    # loc='upper center' and bbox_to_anchor=(0.5, -0.15) pins it below the x-axis
+    # ncol=2 splits the list into two columns for better horizontal use of space
+    ax1.legend(all_handles, all_labels, 
+               loc='upper center', 
+               bbox_to_anchor=(0.5, -0.18), 
+               ncol=2, 
+               fontsize='small', 
+               frameon=True,
+               title="Portfolio Key & Glossary")
+
+    plt.title(f'Portfolio Analysis - {update_date}', fontsize=14, fontweight='bold')
+    
+    # Adjust layout to prevent the bottom legend from being cut off
+    fig.tight_layout()
+    # We add an extra adjustment because tight_layout sometimes struggles with bottom legends
+    plt.subplots_adjust(bottom=0.25) 
+    
+    # 6. Save
     chart_filename = f"portfolio_chart_{update_date}.png"
-    plt.savefig(os.path.join(folder_path, chart_filename))
+    plt.savefig(os.path.join(folder_path, chart_filename), bbox_inches='tight')
     plt.close()
     
     return chart_filename
@@ -195,13 +227,17 @@ def run_update():
                 continue
         else:
             hist = stock.history(period="1d")
-            new_close = round(float(hist['Close'].iloc[-1]), 2)
-            
-            # Incremental Max/Min Update
-            if new_close > float(row['Maximum close price']):
-                df.at[idx, 'Maximum close price'], df.at[idx, 'Maximum close date'] = new_close, today
-            if new_close < float(row['Minimum close price']):
-                df.at[idx, 'Minimum close price'], df.at[idx, 'Minimum close date'] = new_close, today
+            if not hist.empty:
+                new_close = round(float(hist['Close'].iloc[-1]), 2)
+                
+                # Incremental Max/Min Update
+                if new_close > float(row['Maximum close price']):
+                    df.at[idx, 'Maximum close price'], df.at[idx, 'Maximum close date'] = new_close, today
+                if new_close < float(row['Minimum close price']):
+                    df.at[idx, 'Minimum close price'], df.at[idx, 'Minimum close date'] = new_close, today
+            else:
+                print(f"No history found for {ticker_symbol}")
+                continue
 
         # Standard Updates
         df.at[idx, 'Last close price'], df.at[idx, 'Last close date'] = new_close, today
